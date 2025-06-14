@@ -1,6 +1,6 @@
 from django.urls import path
-from .views import predict_view
+from .views import predict_performance  # adjust if your function name is different
 
 urlpatterns = [
-    path('predict/', predict_view),
+    path('predicted/', predict_performance),
 ]

@@ -3,21 +3,25 @@ from django.http import JsonResponse
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import LabelEncoder
 from django.views.decorators.csrf import csrf_exempt
-import numpy as np
 import pandas as pd
-import pymysql
 from django.db import connection
+
 
 @csrf_exempt
 def predict_performance(request):
-    # Step 1: Load data from your MySQL database table: student_cluster_data
+    # Step 1: Load data from your MySQL database table
     with connection.cursor() as cursor:
         cursor.execute("""
-            SELECT student_id, avg_accuracy, avg_consistency, avg_speed,
-                   avg_retention, avg_problem_solving_skills, avg_vocabulary_range,
-                   fk_section_id
-            FROM student_cluster_data
-        """)
+                       SELECT student_id,
+                              avg_accuracy,
+                              avg_consistency,
+                              avg_speed,
+                              avg_retention,
+                              avg_problem_solving_skills,
+                              avg_vocabulary_range,
+                              fk_section_id
+                       FROM student_cluster_data
+                       """)
         rows = cursor.fetchall()
 
     columns = [
@@ -34,7 +38,7 @@ def predict_performance(request):
     ]
     df['overall_performance_score'] = df[performance_cols].mean(axis=1)
 
-    # Step 3: Create performance categories using quantiles
+    # Step 3: Define thresholds and classify
     q1 = df['overall_performance_score'].quantile(0.33)
     q2 = df['overall_performance_score'].quantile(0.67)
 
@@ -42,14 +46,13 @@ def predict_performance(request):
     labels = ['Low Performance', 'Medium Performance', 'High Performance']
     df['overall_performance_category'] = pd.cut(df['overall_performance_score'], bins=bins, labels=labels, right=True)
 
-    # Step 4: Encode labels
+    # Step 4: Encode categories
     le = LabelEncoder()
     df['encoded_performance_category'] = le.fit_transform(df['overall_performance_category'])
 
-    # Step 5: Train the Random Forest model
+    # Step 5: Train Random Forest model with best hyperparameters
     X = df[performance_cols]
     y = df['encoded_performance_category']
-
     model = RandomForestClassifier(
         criterion='gini',
         max_depth=None,
@@ -60,12 +63,21 @@ def predict_performance(request):
     )
     model.fit(X, y)
 
-    # Step 6: Predict using the same dataset (no test/train split needed for demo)
+    # Step 6: Predict and map back to labels
     y_pred = model.predict(X)
     predicted_labels = le.inverse_transform(y_pred)
-
     df['Predicted Performance'] = predicted_labels
 
-    # Step 7: Format response JSON
-    response_data = df[['student_id', 'overall_performance_score', 'Predicted Performance', 'fk_section_id']].to_dict(orient='records')
+    # Step 7: Save predictions to DB
+    with connection.cursor() as cursor:
+        for i, row in df.iterrows():
+            cursor.execute("""
+                           UPDATE student_cluster_data
+                           SET pred_performance = %s
+                           WHERE student_id = %s
+                           """, [row['Predicted Performance'], row['student_id']])
+
+    # Step 8: Return JSON response
+    response_data = df[['student_id', 'overall_performance_score', 'Predicted Performance', 'fk_section_id']].to_dict(
+        orient='records')
     return JsonResponse({'predictions': response_data}, safe=False)

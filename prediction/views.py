@@ -1,4 +1,4 @@
-# views.py (in your Django app, e.g. prediction/views.py)
+# views.py
 from django.http import JsonResponse
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import LabelEncoder
@@ -9,21 +9,28 @@ from django.db import connection
 
 @csrf_exempt
 def predict_performance(request):
-    # Step 1: Load data from your MySQL database table
+    # Load data from student_cluster_data
     with connection.cursor() as cursor:
         cursor.execute("""
-                       SELECT student_id,
-                              avg_accuracy,
-                              avg_consistency,
-                              avg_speed,
-                              avg_retention,
-                              avg_problem_solving_skills,
-                              avg_vocabulary_range,
-                              fk_section_id
-                       FROM student_cluster_data
-                       """)
+            SELECT student_id,
+                   avg_accuracy,
+                   avg_consistency,
+                   avg_speed,
+                   avg_retention,
+                   avg_problem_solving_skills,
+                   avg_vocabulary_range,
+                   fk_section_id
+            FROM student_cluster_data
+            WHERE avg_accuracy IS NOT NULL
+              AND avg_consistency IS NOT NULL
+              AND avg_speed IS NOT NULL
+              AND avg_retention IS NOT NULL
+              AND avg_problem_solving_skills IS NOT NULL
+              AND avg_vocabulary_range IS NOT NULL
+        """)
         rows = cursor.fetchall()
 
+    # Column labels
     columns = [
         'student_id', 'avg_accuracy', 'avg_consistency', 'avg_speed',
         'avg_retention', 'avg_problem_solving_skills', 'avg_vocabulary_range',
@@ -31,26 +38,28 @@ def predict_performance(request):
     ]
     df = pd.DataFrame(rows, columns=columns)
 
-    # Step 2: Calculate overall performance score
+    if df.empty:
+        return JsonResponse({'error': 'No valid data found for prediction.'}, status=400)
+
+    # Calculate average performance
     performance_cols = [
         'avg_accuracy', 'avg_consistency', 'avg_speed',
         'avg_retention', 'avg_problem_solving_skills', 'avg_vocabulary_range'
     ]
     df['overall_performance_score'] = df[performance_cols].mean(axis=1)
 
-    # Step 3: Define thresholds and classify
+    # Define bins and categorize
     q1 = df['overall_performance_score'].quantile(0.33)
     q2 = df['overall_performance_score'].quantile(0.67)
-
     bins = [df['overall_performance_score'].min() - 0.01, q1, q2, df['overall_performance_score'].max() + 0.01]
     labels = ['Low Performance', 'Medium Performance', 'High Performance']
     df['overall_performance_category'] = pd.cut(df['overall_performance_score'], bins=bins, labels=labels, right=True)
 
-    # Step 4: Encode categories
+    # Encode for model training
     le = LabelEncoder()
     df['encoded_performance_category'] = le.fit_transform(df['overall_performance_category'])
 
-    # Step 5: Train Random Forest model with best hyperparameters
+    # Train Random Forest
     X = df[performance_cols]
     y = df['encoded_performance_category']
     model = RandomForestClassifier(
@@ -63,21 +72,22 @@ def predict_performance(request):
     )
     model.fit(X, y)
 
-    # Step 6: Predict and map back to labels
+    # Predict
     y_pred = model.predict(X)
-    predicted_labels = le.inverse_transform(y_pred)
-    df['Predicted Performance'] = predicted_labels
+    df['Predicted Performance'] = le.inverse_transform(y_pred)
 
-    # Step 7: Save predictions to DB
+    # Save back to DB
     with connection.cursor() as cursor:
-        for i, row in df.iterrows():
+        for _, row in df.iterrows():
             cursor.execute("""
-                           UPDATE student_cluster_data
-                           SET pred_performance = %s
-                           WHERE student_id = %s
-                           """, [row['Predicted Performance'], row['student_id']])
+                UPDATE student_cluster_data
+                SET pred_performance = %s
+                WHERE student_id = %s
+            """, [row['Predicted Performance'], row['student_id']])
 
-    # Step 8: Return JSON response
-    response_data = df[['student_id', 'overall_performance_score', 'Predicted Performance', 'fk_section_id']].to_dict(
-        orient='records')
-    return JsonResponse({'predictions': response_data}, safe=False)
+    # Return JSON
+    response_data = df[[
+        'student_id', 'overall_performance_score', 'Predicted Performance', 'fk_section_id'
+    ]].to_dict(orient='records')
+
+    return JsonResponse({'success': True, 'predictions': response_data}, status=200)
